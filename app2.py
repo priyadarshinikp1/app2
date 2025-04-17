@@ -3,19 +3,36 @@ import pandas as pd
 import networkx as nx
 import plotly.graph_objects as go
 import io
+import requests
 
-st.set_page_config(page_title="Multi-Omics Gene Network", layout="wide")
-st.title("🧬 Multi-Omics Integration and Gene Network Explorer")
-
-# 🔧 Helper to load CSV with encoding handling and clean column names
+# Helper to load CSV with encoding handling and clean column names
 def load_csv(file):
     try:
         df = pd.read_csv(io.StringIO(file.getvalue().decode('utf-8')))
     except UnicodeDecodeError:
         df = pd.read_csv(io.StringIO(file.getvalue().decode('latin1')))
-    
     df.columns = df.columns.str.strip()  # Clean column names (remove extra spaces)
     return df
+
+# Function to fetch metabolites from HMDB based on gene
+def fetch_metabolites_from_hmdb(gene):
+    url = f"https://hmdb.ca/api/1/metabolites/gene/{gene}"  # This is a placeholder URL; update with correct endpoint if available
+    response = requests.get(url)
+    if response.status_code == 200:
+        metabolites = response.json()  # Assuming the response is in JSON format
+        return metabolites
+    else:
+        return []
+
+# Function to fetch pathways and diseases from SMPDB based on metabolite
+def fetch_pathways_diseases_from_smpdb(metabolite):
+    url = f"https://smpdb.ca/api/pathways/metabolite/{metabolite}"  # This is a placeholder URL; update with correct endpoint if available
+    response = requests.get(url)
+    if response.status_code == 200:
+        pathways_diseases = response.json()  # Assuming the response is in JSON format
+        return pathways_diseases
+    else:
+        return []
 
 # Sidebar for file uploads
 st.sidebar.header("Upload your CSV files")
@@ -39,11 +56,11 @@ if genomics_file and transcriptomics_file and proteomics_file:
     # Gene-enzyme associations from gene_association_file and abberant enzyme data
     gene_links = gene_assoc_df[gene_assoc_df['Gene'].isin(common_genes)]
     abberant_enzymes = abberant_enzyme_df['Enzyme'].dropna().unique()
-    
+
     # Create graph
     G = nx.Graph()
 
-    # Add nodes for genes and enzymes, ensuring the 'type' attribute is set
+    # Add nodes for genes and enzymes
     for gene in common_genes:
         G.add_node(gene, type='gene')  # Adding 'type' as 'gene' for each common gene
     for enzyme in abberant_enzymes:
@@ -51,14 +68,42 @@ if genomics_file and transcriptomics_file and proteomics_file:
 
     # Add edges (gene-to-enzyme association)
     for _, row in gene_links.iterrows():
-        G.add_edge(row['Gene'], row['Enzyme'], type='gene-enzyme')  # This links genes and enzymes
+        G.add_edge(row['Gene'], row['Enzyme'], type='gene-enzyme')
     
+    # Fetch metabolites for each common gene from HMDB
+    for gene in common_genes:
+        metabolites = fetch_metabolites_from_hmdb(gene)
+        for metabolite in metabolites:
+            G.add_node(metabolite, type='metabolite')
+            G.add_edge(gene, metabolite, type='gene-metabolite')
+
+            # Fetch associated diseases and pathways from SMPDB
+            pathways_diseases = fetch_pathways_diseases_from_smpdb(metabolite)
+            for pathway_disease in pathways_diseases:
+                pathway = pathway_disease.get('Pathway')
+                disease = pathway_disease.get('Disease')
+                if pathway:
+                    if pathway not in G:
+                        G.add_node(pathway, type='pathway')
+                    G.add_edge(metabolite, pathway, type='metabolite-pathway')
+                if disease:
+                    if disease not in G:
+                        G.add_node(disease, type='disease')
+                    G.add_edge(metabolite, disease, type='metabolite-disease')
+
+    # Add enzyme-disease associations (from gene_association_file or abberant_enzyme_file)
+    for _, row in gene_links.iterrows():
+        G.add_edge(row['Enzyme'], row['Disease'], type='enzyme-disease')
+
     # Define colors for node types
     type_colors = {
         'gene': 'blue',
         'enzyme': 'green',
+        'metabolite': 'orange',
+        'pathway': 'purple',
+        'disease': 'red'
     }
-    
+
     # Create a plotly network plot
     node_x = []
     node_y = []
@@ -72,7 +117,7 @@ if genomics_file and transcriptomics_file and proteomics_file:
     for node, (x, y) in pos.items():
         node_x.append(x)
         node_y.append(y)
-        node_type = G.nodes[node]['type', 'unknown']
+        node_type = G.nodes[node].get('type', 'unknown')
         node_color.append(type_colors.get(node_type, 'gray'))
         node_size.append(10)
 
@@ -113,10 +158,9 @@ if genomics_file and transcriptomics_file and proteomics_file:
     # Create figure
     fig = go.Figure(data=[edge_trace, node_trace])
 
-    # 🎨 Network Visualization Layout
+    # Network Visualization Layout
     fig.update_layout(
-        title="Gene-Enzyme-Disease-Metabolite Network",
-        titlefont=dict(size=18),
+        title=dict(text="Gene-Enzyme-Metabolite-Pathway-Disease Network", font=dict(size=18)),
         showlegend=True,
         hovermode='closest',
         margin=dict(b=20, l=5, r=5, t=40),
@@ -126,6 +170,18 @@ if genomics_file and transcriptomics_file and proteomics_file:
 
     # Display the network graph
     st.plotly_chart(fig)
+
+    # Document interactions in a table
+    interactions = []
+    for edge in G.edges(data=True):
+        interactions.append({
+            'Node 1': edge[0],
+            'Node 2': edge[1],
+            'Interaction Type': edge[2].get('type', 'unknown')
+        })
+    interactions_df = pd.DataFrame(interactions)
+    st.subheader("Interactions Table")
+    st.dataframe(interactions_df)
 
 else:
     st.sidebar.warning("Please upload all necessary files to generate the network.")
